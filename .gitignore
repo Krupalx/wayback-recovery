@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+dist/
+build/
+output/
+.recovery_state.json
