@@ -105,7 +105,7 @@ CDN assets keep their full path, so Squarespace images end up under
 
 ## Benchmarks
 
-Tested against `airparisagency.com` (a Squarespace site that went offline in 2023):
+Tested against a mid-size Squarespace portfolio site that went offline in 2023:
 
 ```
 Ruby wayback_machine_downloader:  484 HTML pages,   57 images
