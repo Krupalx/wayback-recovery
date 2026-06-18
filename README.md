@@ -1,52 +1,67 @@
 # wayback-recovery
 
-A command-line tool for recovering dead websites from web archives.
+A recon tool for pulling full site archives from the Wayback Machine without getting banned.
 
-Most site recovery tools only hit the Wayback Machine and call it a day. This one
-cross-references three independent sources — Wayback Machine, Common Crawl, and
-live CDN endpoints — to pull back as much of a site as possible. It was built out
-of frustration with the existing Ruby tool (`wayback_machine_downloader`), which
-hasn't been maintained since 2021 and routinely gets IP-banned mid-crawl.
+## The problem
 
-## How it works
+If you've done any target recon, you know the pain. You need to map out an application's
+full attack surface — old endpoints, deprecated API routes, JavaScript files with hardcoded
+secrets, admin panels that got "removed" but never actually taken down. The Wayback Machine
+has all of this archived, but the moment you start scraping it at any reasonable speed,
+you get rate-limited or straight up IP-banned mid-crawl.
 
-The recovery runs in four phases:
+The existing tools make this worse. The popular Ruby `wayback_machine_downloader` hasn't
+been updated since 2021, uses HTTP instead of HTTPS, sends the same User-Agent on every
+request, and has zero retry logic. It gets blocked within minutes on most targets.
 
-**1. Discovery** — Queries the Wayback Machine CDX API and Common Crawl indexes
-to build a complete map of every URL ever captured for your domain. Deduplicates
-by URL, keeping the most recent capture while retaining older timestamps as
-fallbacks.
+## What this does differently
 
-**2. Wayback Machine downloads** — Fetches raw content (no Wayback toolbar) for
-each unique URL. If a capture returns a 503 or times out, it automatically tries
-alternative timestamps from the CDX index before giving up.
+This tool was built specifically to handle the rate-limiting problem while maximizing
+the data you pull back. It cross-references three independent archive sources so you
+get the most complete picture of a target's history:
 
-**3. Common Crawl gap-fill** — Any URLs that Wayback missed (or that failed) get
-a second chance via Common Crawl's WARC archives. These are fetched with byte-range
-requests so we only download the specific records we need.
+**Wayback Machine** — The primary source. Queries the CDX API to discover every URL
+ever archived for your target, then downloads the raw content with anti-ban measures
+baked in: rotating User-Agents, HTTPS-only, randomized delays between requests, and
+automatic backoff when rate-limited.
 
-**4. Live CDN detection** — Scans recovered HTML for references to platform CDNs
-(Squarespace, WordPress, Wix, Cloudinary) and checks if those assets are still
-being served. Many hosting platforms keep image CDN endpoints alive long after a
-site goes down. This is where the big wins come from — in testing, this phase alone
-recovered 40x more images than the Ruby tool finds in total.
+**Common Crawl** — An independent web archive that often has pages Wayback missed.
+Fetches via byte-range requests from their S3 storage — different infrastructure,
+different rate limits, fills gaps.
+
+**Live CDN detection** — Scans recovered HTML for references to platform CDNs
+(Squarespace, WordPress, Wix, Cloudinary). Many hosting platforms keep their CDN
+endpoints serving content long after a site is "taken down." This pulls back images,
+scripts, and assets that no other archival tool finds.
+
+## Why this matters for recon
+
+Once you have a full site archive locally, you can grep through it offline without
+any rate limits or detection:
+
+- Old JavaScript files with API keys, tokens, internal URLs
+- Deprecated endpoints that may still be live but removed from the current sitemap
+- Admin panels and debug pages that existed in earlier versions
+- Email addresses, internal hostnames, S3 bucket names buried in HTML comments
+- Full URL structure history showing how the application evolved
+- Source maps and unminified code from older deploys
+
+You pull everything once, then analyze at your own pace without touching the target again.
 
 ## Anti-ban measures
 
-Getting blocked by the Wayback Machine mid-recovery defeats the purpose. The tool
-uses HTTPS (not HTTP), rotates through realistic browser User-Agent strings, and
-inserts random delays between requests (5-10 seconds by default). If it gets a 429
-rate-limit response, it backs off progressively rather than hammering the endpoint.
-
-## Resume support
-
-Recovery state is written to a JSON file after each successful download. If the
-process is interrupted (network drop, laptop sleep, ctrl-c), just run the same
-command again and it picks up where it left off. No re-downloading, no duplicates.
+- HTTPS only (HTTP requests to archive.org get flagged faster)
+- Rotates through 5 realistic browser User-Agent strings
+- Random delays between requests (5-10s default, configurable)
+- Progressive backoff on 429 responses (15s, 30s, 45s)
+- Automatic fallback to alternative timestamps when a capture returns 503
+- Three independent sources means you're not hammering any single endpoint
 
 ## Installation
 
 ```
+git clone https://github.com/Krupalx/wayback-recovery.git
+cd wayback-recovery
 pip install -e .
 ```
 
@@ -54,81 +69,96 @@ Requires Python 3.10+.
 
 ## Usage
 
-Recover a full site:
+Pull everything for a target:
 
 ```
-wayback-recovery recover example.com
+wayback-recovery recover target.com
 ```
 
-Reduce delays between requests (faster, but higher chance of getting rate-limited):
+Fast mode (shorter delays, higher risk of rate limiting):
 
 ```
-wayback-recovery recover example.com --fast
+wayback-recovery recover target.com --fast
 ```
 
-Only use Wayback Machine (skip Common Crawl and CDN checks):
+Only Wayback Machine (quickest, skip Common Crawl and CDN):
 
 ```
-wayback-recovery recover example.com --no-commoncrawl --no-cdn
+wayback-recovery recover target.com --no-commoncrawl --no-cdn
 ```
 
-Limit to N files (useful for testing or partial recovery):
+Limit downloads (good for testing or when you only need a sample):
 
 ```
-wayback-recovery recover example.com --limit 50
+wayback-recovery recover target.com --limit 100
 ```
 
-Custom output directory:
+Custom output path:
 
 ```
-wayback-recovery recover example.com -o ./recovered-sites
+wayback-recovery recover target.com -o ./recon/target
 ```
 
-Check progress on a recovery in progress:
+Check progress on a long-running recovery:
 
 ```
-wayback-recovery status example.com
+wayback-recovery status target.com
 ```
 
-See what's missing and why:
+See what failed and why:
 
 ```
-wayback-recovery report example.com
+wayback-recovery report target.com
 ```
+
+## Resume support
+
+Recovery state is tracked in a JSON file. If your connection drops, your VPN
+reconnects, or you just ctrl-c out — run the same command again and it picks up
+exactly where it left off. No wasted time re-downloading what you already have.
 
 ## Output structure
 
-Files are saved in their original directory structure under `output/<domain>/`.
-A homepage at `example.com/about/` becomes `output/example.com/about/index.html`.
-CDN assets keep their full path, so Squarespace images end up under
-`output/example.com/images.squarespace-cdn.com/...`.
+Files are saved in their original path structure:
+
+```
+output/target.com/
+  index.html
+  api/v1/users/index.html
+  static/js/app.bundle.js
+  admin/login/index.html
+  ...
+```
+
+From here you can run whatever analysis you want — `grep -r "api_key"`, feed it
+into your own tooling, diff it against the current live version, etc.
 
 ## Benchmarks
 
-Tested against a mid-size Squarespace portfolio site that went offline in 2023:
+Tested against a mid-size Squarespace site:
 
 ```
-Ruby wayback_machine_downloader:  484 HTML pages,   57 images
-wayback-recovery:                 539 HTML pages, 2287 images
+Ruby wayback_machine_downloader:  484 pages,   57 assets
+wayback-recovery:                 539 pages, 2287 assets
 ```
 
-The difference is almost entirely from live CDN detection — Squarespace was still
-serving those images years after the site was taken down.
+The 40x difference in assets is from live CDN detection — a feature no other
+archival tool implements.
 
-## Options reference
+## Options
 
 ```
 wayback-recovery recover [OPTIONS] DOMAIN
 
-  --output, -o       Output directory (default: output)
-  --delay-min        Minimum seconds between requests (default: 5)
-  --delay-max        Maximum seconds between requests (default: 10)
-  --no-wayback       Skip Wayback Machine source
-  --no-commoncrawl   Skip Common Crawl source
-  --no-cdn           Skip live CDN detection
-  --no-resume        Ignore previous progress, start fresh
-  --fast             Use shorter delays (1-3s)
-  --limit            Cap the number of files to download (0 = no limit)
+  -o, --output       Output directory (default: output)
+  --delay-min        Min seconds between requests (default: 5)
+  --delay-max        Max seconds between requests (default: 10)
+  --no-wayback       Skip Wayback Machine
+  --no-commoncrawl   Skip Common Crawl
+  --no-cdn           Skip CDN detection
+  --no-resume        Start fresh, ignore previous state
+  --fast             Use 1-3s delays instead of 5-10s
+  --limit            Cap number of files to download
 ```
 
 ## License
